@@ -1,14 +1,15 @@
 from pathlib import Path
-
+import time
+import copy
 import numpy as np
 import pybullet as p
 from geometrout import Cuboid, Sphere, Cylinder, SE3
-
+from scipy.spatial.transform import Rotation as R
 from robofin.robots import FrankaRobot, FrankaGripper
 from robofin.pointcloud.numpy import transform_pointcloud
 import math
 import trimesh
-
+from ikfast_franka_panda import get_fk, get_ik
 
 class BulletRobot:
     def __init__(self, clid, hd=False, **kwargs):
@@ -18,63 +19,45 @@ class BulletRobot:
         self.id = self.load(clid)
         self._setup_robot()
         self._set_robot_specifics(**kwargs)
+        self._set_gripper_constraint()
+        self._set_robot_initial_pose(np.r_[-6.8229338e-06, -1.9273859e-01, 1.1898350e-03, -1.9625933e+00,
+                                           1.4666162e-03, 1.7754314e+00, 7.8662562e-01, 0.04, 0.04])
 
     def load(self, clid, urdf_path=None):
         if self.hd:
             urdf = self.robot_type.hd_urdf
         else:
             urdf = self.robot_type.urdf
-        return p.loadURDF(
-            urdf,
-            useFixedBase=True,
-            physicsClientId=clid,
-            flags=p.URDF_USE_SELF_COLLISION,
-        )
+        return p.loadURDF(urdf,
+                          [0, 0, 0.0],
+                          useFixedBase=True,
+                          physicsClientId=clid,
+                          flags=p.URDF_USE_SELF_COLLISION)
 
     @property
     def links(self):
-        """
-        :return: The names and bullet ids of all links for the loaded robot
-        """
         return [(k, v) for k, v in self._link_name_to_index.items()]
 
     def link_id(self, name):
-        """
-        :return: The bullet id corresponding to a specific link name
-        """
         return self._link_name_to_index[name]
 
     def link_name(self, id):
-        """
-        :return: The name corresponding to a particular bullet id
-        """
         return self._index_to_link_name[id]
 
     @property
     def link_frames(self):
-        """
-        :return: A dictionary where the link names are the keys
-            and the values are the correponding poses as reflected
-            by the current state of the environment
-        """
-        ret = p.getLinkStates(
-            self.id,
-            list(range(len(self.links) - 1)),
-            computeForwardKinematics=True,
-            physicsClientId=self.clid,
-        )
+        ret = p.getLinkStates(self.id,
+                              list(range(len(self.links) - 1)),
+                              computeForwardKinematics=True,
+                              physicsClientId=self.clid)
         frames = {}
         for ii, r in enumerate(ret):
-            frames[self.link_name(ii)] = SE3(
-                np.array(r[4]),
-                np.array([r[5][3], r[5][0], r[5][1], r[5][2]]),
-            )
+            frames[self.link_name(ii)] = SE3(np.array(r[4]),
+                                             np.array([r[5][3], r[5][0], r[5][1], r[5][2]]))
         return frames
 
     def closest_distance_to_self(self, max_radius):
-        contacts = p.getClosestPoints(
-            self.id, self.id, max_radius, physicsClientId=self.clid
-        )
+        contacts = p.getClosestPoints(self.id, self.id, max_radius, physicsClientId=self.clid)
         # Manually filter out fixed connections that shouldn't be considered
         # TODO fix this somehow
         filtered = []
@@ -108,19 +91,9 @@ class BulletRobot:
         return None
 
     def in_collision(self, obstacles, radius=0.0, check_self=False, ignore_base=True):
-        """
-        Checks whether the robot is in collision with the environment
-
-        :return: Boolean
-        """
         raise NotImplementedError
 
     def get_collision_points(self, obstacles, check_self=False):
-        """
-        Checks whether the robot is in collision with the environment
-
-        :return: Boolean
-        """
         points = []
         # Step the simulator (only enough for collision detection)
         p.performCollisionDetection(physicsClientId=self.clid)
@@ -174,18 +147,9 @@ class BulletRobot:
         return [abs(d) for d in distances if d < 0]
 
     def _setup_robot(self):
-        """
-        Internal function for setting up the correspondence
-        between link names and ids.
-        """
-        # Code snippet borrowed from https://pybullet.org/Bullet/phpBB3/viewtopic.php?t=12728
-        self._link_name_to_index = {
-            p.getBodyInfo(self.id, physicsClientId=self.clid)[0].decode("UTF-8"): -1
-        }
+        self._link_name_to_index = {p.getBodyInfo(self.id, physicsClientId=self.clid)[0].decode('UTF-8'): -1}
         for _id in range(p.getNumJoints(self.id, physicsClientId=self.clid)):
-            _name = p.getJointInfo(self.id, _id, physicsClientId=self.clid)[12].decode(
-                "UTF-8"
-            )
+            _name = p.getJointInfo(self.id, _id, physicsClientId=self.clid)[12].decode('UTF-8')
             self._link_name_to_index[_name] = _id
         self._index_to_link_name = {}
 
@@ -193,8 +157,48 @@ class BulletRobot:
             self._index_to_link_name[v] = k
 
     def _set_robot_specifics(self, **kwargs):
-        raise NotImplemented("Must be set in the robot specific class")
+        raise NotImplemented('Must be set in the robot specific class')
 
+    def _set_gripper_constraint(self):
+        raise NotImplemented('Must be set in the robot specific class')
+
+    def _set_robot_initial_pose(self):
+        raise NotImplemented('Must be set in the robot specific class')
+    
+    def update_debug_line(self, pos, quat, len, color=None, replaceItemUniqueId=None):
+        mtx = np.eye(4)
+        mtx[:3, :3] = R.from_quat(quat).as_matrix()
+        pos_end = (np.r_[pos] + (mtx @ np.r_[0.0, 0.0, len, 1])[:3]).tolist()
+        
+        if replaceItemUniqueId is None:
+            uid = p.addUserDebugLine(pos, pos_end, lineColorRGB=[1, 0, 0] if color is None else color,
+                                     lineWidth=2.0, lifeTime=0, physicsClientId=self.clid)
+        else:
+            uid = p.addUserDebugLine(pos, pos_end, lineColorRGB=[1, 0, 0] if color is None else color,
+                                     lineWidth=2.0, lifeTime=0, replaceItemUniqueId=replaceItemUniqueId,
+                                     physicsClientId=self.clid)
+        return uid
+
+    def update_collision_debug_points(self, collisions, color=None, replaceItemUniqueId=None):
+        if color is None:
+            colors = [[1, 0, 0] for c in collisions]
+        else:
+            colors = [color for c in collisions]
+
+        if replaceItemUniqueId is None:
+            uid = p.addUserDebugPoints([list(c[1]) for c in collisions],
+                                       pointColorsRGB=colors,
+                                       pointSize=15.0, physicsClientId=self.clid)
+        else:
+            uid = p.addUserDebugPoints([list(c[1]) for c in collisions],
+                                       pointColorsRGB=colors,
+                                       pointSize=15.0, replaceItemUniqueId=replaceItemUniqueId,
+                                       physicsClientId=self.clid)
+        return uid
+    
+    def remove_collision_debug_points(self, itemUniqueId):
+        p.removeUserDebugItem(itemUniqueId=itemUniqueId, physicsClientId=self.clid)
+        
 
 class BulletFranka(BulletRobot):
     robot_type = FrankaRobot
@@ -202,61 +206,110 @@ class BulletFranka(BulletRobot):
     def _set_robot_specifics(self, default_prismatic_value=0.025):
         self.default_prismatic_value = default_prismatic_value
 
-    def marionette(self, state, velocities=None):
+    def _set_gripper_constraint(self):
+        self.gcid = p.createConstraint(
+            parentBodyUniqueId=self.id,
+            parentLinkIndex=self.link_id('panda_leftfinger'),
+            childBodyUniqueId=self.id,
+            childLinkIndex=self.link_id('panda_rightfinger'),
+            jointType=p.JOINT_GEAR,
+            jointAxis=[1.0, 0.0, 0.0],
+            parentFramePosition=np.r_[0., 0., 0.],
+            parentFrameOrientation=np.r_[0., 0., 0., 1.],
+            childFramePosition=np.r_[0., 0., 0.],
+            childFrameOrientation=np.r_[0., 0., 0., 1.],
+            physicsClientId=self.clid
+        )
+        p.changeConstraint(self.gcid, gearRatio=-1, erp = 0.1, maxForce=50)
+    
+    def _set_robot_initial_pose(self, state):
+        velocities = [0.0 for _ in state]
+        for i in range(0, 7):
+            p.resetJointState(self.id,
+                              i,
+                              state[i],
+                              targetVelocity=velocities[i],
+                              physicsClientId=self.clid)
+        p.resetJointState(self.id,
+                          9,
+                          state[7],
+                          targetVelocity=velocities[7],
+                          physicsClientId=self.clid)
+        p.resetJointState(self.id,
+                          10,
+                          state[8],
+                          targetVelocity=velocities[8],
+                          physicsClientId=self.clid)
+
+
+    def marionette(self, state, velocities=None, kinematics=False):
         if velocities is None:
             velocities = [0.0 for _ in state]
         assert len(state) == len(velocities)
         for i in range(0, 7):
-            p.resetJointState(
-                self.id,
-                i,
-                state[i],
-                targetVelocity=velocities[i],
-                physicsClientId=self.clid,
-            )
+            if kinematics:
+                p.resetJointState(self.id, i, state[i],
+                                  targetVelocity=velocities[i], physicsClientId=self.clid)
+            else:
+                p.setJointMotorControl2(self.id, i, p.POSITION_CONTROL, targetPosition=state[i],
+                                        physicsClientId=self.clid)
 
         if len(state) == 9:
-            p.resetJointState(
-                self.id,
-                9,
-                state[7],
-                targetVelocity=velocities[7],
-                physicsClientId=self.clid,
-            )
-            p.resetJointState(
-                self.id,
-                10,
-                state[8],
-                targetVelocity=velocities[8],
-                physicsClientId=self.clid,
-            )
-        elif len(state) == 7:
-            # Spread the fingers if they aren't included--prevents self collision
-            p.resetJointState(
-                self.id,
-                9,
-                self.default_prismatic_value,
-                targetVelocity=0.0,
-                physicsClientId=self.clid,
-            )
-            p.resetJointState(
-                self.id,
-                10,
-                self.default_prismatic_value,
-                targetVelocity=0.0,
-                physicsClientId=self.clid,
-            )
-        else:
-            raise Exception("Length of input state should be either 7 or 9")
+            if kinematics:
+                p.resetJointState(self.id, 9, state[7],
+                                  targetVelocity=velocities[7], physicsClientId=self.clid)
+                p.resetJointState(self.id, 10, state[8],
+                                  targetVelocity=velocities[8], physicsClientId=self.clid)
+            else:
+                p.setJointMotorControl2(self.id, 9, p.POSITION_CONTROL, targetPosition=state[7],
+                                        force=20, physicsClientId=self.clid)
+                p.setJointMotorControl2(self.id, 10, p.POSITION_CONTROL, targetPosition=state[8],
+                                        force=20, physicsClientId=self.clid)
 
-    def get_joint_states(self):
-        """
-        :return: (joint positions, joint velocities)
-        """
-        states = p.getJointStates(
-            self.id, [0, 1, 2, 3, 4, 5, 6, 9, 10], physicsClientId=self.clid
-        )
-        return [s[0] for s in states], [s[1] for s in states]
+        elif len(state) == 7:
+            p.resetJointState(self.id, 9, self.default_prismatic_value,
+                              targetVelocity=0.0, physicsClientId=self.clid)
+            p.resetJointState(self.id, 10, self.default_prismatic_value,
+                              targetVelocity=0.0, physicsClientId=self.clid)
+        else:
+            raise Exception('Length of input state should be either 7 or 9')
+
+    def get_joint_states(self, fk=False):
+        states = p.getJointStates(self.id, [0, 1, 2, 3, 4, 5, 6, 9, 10], physicsClientId=self.clid)
+        if not fk:
+            return [s[0] for s in states], [s[1] for s in states]
+        else:
+            pos_fk, mtx_fk = get_fk([s[0] for s in states][:7])
+            return [s[0] for s in states], [s[1] for s in states], pos_fk, mtx_fk
+            
+    def get_cartesian_state(self, name='panda_grasptarget'):
+        uid = self.link_id(name)
+        pos, quat = p.getLinkState(self.id, uid, physicsClientId=self.clid)[:2]
+        return pos, quat
+
+    def get_jacobian(self, name='panda_grasptarget'):
+        uid = self.link_id(name)
+        result = p.getLinkState(self.id,
+                                uid,
+                                computeLinkVelocity=1,
+                                computeForwardKinematics=1,
+                                physicsClientId=self.clid)
+        link_trn, link_rot, com_trn, com_rot, frame_pos, frame_rot, link_vt, link_vr = result
+
+        joint_states = p.getJointStates(self.id,
+                                        range(p.getNumJoints(self.id, physicsClientId=self.clid)),
+                                        physicsClientId=self.clid)
+        joint_infos = [p.getJointInfo(self.id, i, physicsClientId=self.clid)
+                       for i in range(p.getNumJoints(self.id, physicsClientId=self.clid))]
+        joint_states = [j for j, i in zip(joint_states, joint_infos) if i[3] > -1]
+
+        mpos = [state[0] for state in joint_states]
+        zero_vec = [0.0] * len(mpos)
+
+        jac_t, jac_r = p.calculateJacobian(self.id, uid, com_trn, mpos, zero_vec, zero_vec, physicsClientId=self.clid)
+
+        jacobian = np.concatenate([np.array(jac_t), np.array(jac_r)])
+        return jacobian[:, :7]
 
     def control_position(self, state):
         assert len(state) in [7, 9]
@@ -273,15 +326,12 @@ class BulletFranka(BulletRobot):
         )
 
     def in_collision(self, obstacles, radius=0.0, check_self=False, ignore_base=True):
-        """
-        Checks whether the robot is in collision with the environment
-
-        :return: Boolean
-        """
         # Step the simulator (only enough for collision detection)
         if check_self:
-            contacts = p.getClosestPoints(
-                self.id, self.id, radius, physicsClientId=self.clid
+            contacts = p.getContactPoints(
+                self.id, self.id,
+                # radius,
+                physicsClientId=self.clid
             )
             # Manually filter out fixed connections that shouldn't be considered
             # TODO fix this somehow
@@ -299,18 +349,26 @@ class BulletFranka(BulletRobot):
                     continue
                 filtered.append(c)
             if len(filtered) > 0:
-                return True
+                return [[c[1], c[5], c[9]] for c in contacts]
 
         # Iterate through all obstacles to check for collisions
-        for id in obstacles:
-            contacts = p.getClosestPoints(
-                self.id, id, radius, physicsClientId=self.clid
+        for i, id in enumerate(obstacles[1:]):
+            contacts = p.getContactPoints(
+                self.id, id,
+                # radius,
+                physicsClientId=self.clid
             )
             if ignore_base:
                 contacts = [c for c in contacts if c[3] > -1]
-            if len(contacts) > 0:
-                return True
-        return False
+            if i == 0:
+                if len(contacts) > 0:
+                    return [[c[1], c[5], c[9]] for c in contacts]
+            else:
+                contacts = [c for c in contacts if c[3] != 9 and c[3] != 10]
+                if len(contacts) > 0:
+                    return [[c[1], c[5], c[9]] for c in contacts]
+        return []
+    
 
 
 class BulletFrankaGripper(BulletRobot):
@@ -318,6 +376,9 @@ class BulletFrankaGripper(BulletRobot):
 
     def _set_robot_specifics(self, default_prismatic_value=0.025):
         self.default_prismatic_value = default_prismatic_value
+
+    def _set_gripper_constraint(self):
+        pass
 
     def marionette(self, state, frame="right_gripper"):
         assert isinstance(state, SE3)
@@ -339,7 +400,7 @@ class BulletFrankaGripper(BulletRobot):
                 )
             )
             state = state * transform
-        elif frame == "panda_grasptarget":
+        elif frame == 'panda_grasptarget':
             transform = SE3.from_matrix(
                 np.array(
                     [
@@ -437,11 +498,7 @@ class VisualGripper:
 
 class Bullet:
     def __init__(self, gui=False, headless=False):
-        """
-        :param gui: Whether to use a gui to visualize the environment.
-            Only one gui instance allowed
-        """
-        assert not (gui and headless), "GUI cannot be turned on for headless mode"
+        assert not (gui and headless), 'GUI cannot be turned on for headless mode'
         self.use_gui = gui
         self.headless = headless
         if self.use_gui:
@@ -453,10 +510,39 @@ class Bullet:
         self.poses = []
 
     def __del__(self):
-        """
-        Disconnects the client on destruction
-        """
         p.disconnect(self.clid)
+
+    def load_robot(self, robot_type, hd=False, collision_free=False, **kwargs):
+        if robot_type == FrankaRobot:
+            robot = BulletFranka(self.clid, hd, **kwargs)
+        elif robot_type == FrankaGripper:
+            if collision_free:
+                robot = VisualGripper(self.clid, **kwargs)
+            else:
+                robot = BulletFrankaGripper(self.clid, **kwargs)
+        self.robots[robot.id] = robot
+        return robot
+
+    def in_collision(self, robot, radius=0.0, check_self=False, **kwargs):
+        return robot.in_collision(self.obstacle_ids, radius, check_self, **kwargs)
+    
+    def in_collision_table(self):
+        contacts = []
+        table_id = self.obstacle_ids[1]
+        for id in self.obstacle_ids[2:]:
+            _contacts = p.getContactPoints(table_id, id, physicsClientId=self.clid)
+            if _contacts:
+                contact_force = np.sum([c[9] for c in _contacts])
+                contact_pos = np.mean([c[5] for c in _contacts], axis=0)
+                contacts.append([id, contact_force, contact_pos])
+        return contacts
+                
+    def save_state(self):
+        self.snapshot_id = p.saveState(physicsClientId=self.clid)
+
+    def restore_state(self):
+        p.restoreState(self.snapshot_id)
+
 
     def visualize_pose(self, pose):
         root_path = Path("/tmp")
@@ -578,16 +664,15 @@ class Bullet:
 
     def get_camera_position(self):
         params = p.getDebugVisualizerCamera(physicsClientId=self.clid)
-        return {
-            "yaw": params[8],
-            "pitch": params[9],
-            "distance": params[10],
-            "target": params[11],
-        }
+        return {'yaw': params[8],
+                'pitch': params[9],
+                'distance': params[10],
+                'target': params[11]}
+
 
     def get_camera_images(
         self,
-        camera_T_world,
+        extrinsic,
         width=640,
         height=480,
         fx=616.36529541,
@@ -598,25 +683,22 @@ class Bullet:
         far=10,
         scale=True,
     ):
-        projection_matrix = (
-            2.0 * fx / width,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            2.0 * fy / height,
-            0.0,
-            0.0,
-            1.0 - 2.0 * cx / width,
-            2.0 * cy / height - 1.0,
-            (far + near) / (near - far),
-            -1.0,
-            0.0,
-            0.0,
-            2.0 * far * near / (near - far),
-            0.0,
-        )
-        view_matrix = camera_T_world.matrix.T.reshape(16)
+        perspective = np.array([[fx, 0.0, -cx, 0.0],
+                                [0.0, fy, -cy, 0.0],
+                                [0.0, 0.0, near + far, near * far],
+                                [0.0, 0.0, -1.0, 0.0]])
+        left, right, bottom, top = 0.0, width, height, 0.0
+        ortho = np.diag([2.0 / (right - left), 2.0 / (top - bottom), -2.0 / (far - near), 1.0])
+        ortho[0, 3] = -(right + left) / (right - left)
+        ortho[1, 3] = -(top + bottom) / (top - bottom)
+        ortho[2, 3] = -(far + near) / (far - near)
+        projection_matrix = ortho @ perspective
+
+        view_matrix = copy.deepcopy(extrinsic)
+        view_matrix[2, :] *= -1  # flip the Z axis
+        view_matrix = view_matrix.flatten(order='F')
+        projection_matrix = projection_matrix.flatten(order='F')
+
         _, _, rgb, depth, seg = p.getCameraImage(
             width=width,
             height=height,
@@ -631,71 +713,63 @@ class Bullet:
 
     def get_pointcloud_from_camera(
         self,
-        camera_T_world,
+        extrinsic,
+        depth_image,
+        segmentation,        
         width=640,
         height=480,
         fx=616.36529541,
         fy=616.20294189,
         cx=310.25881958,
         cy=310.25881958,
-        near=0.01,
         far=10,
-        remove_robot=None,
-        keep_robot=None,
         finite_depth=True,
     ):
-        assert not (keep_robot is not None and remove_robot is not None)
-        _, depth_image, segmentation = self.get_camera_images(
-            camera_T_world,
-            width,
-            height,
-            fx,
-            fy,
-            cx,
-            cy,
-            near,
-            far * 2,
-        )
         # Remove all points that are too far away
         depth_image[depth_image > far] = 0.0
         K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
-        if remove_robot is not None:
-            depth_image[segmentation == remove_robot.id] = 0.0
-        elif keep_robot is not None:
-            depth_image[segmentation != keep_robot.id] = 0.0
-        x, y = np.meshgrid(np.arange(width), np.arange(height))
-        ones = np.ones((height, width))
-        image_points = np.stack((x, y, ones), axis=2).reshape(width * height, 3).T
-        backprojected = np.linalg.inv(K) @ image_points
-        pc = np.multiply(
-            np.tile(depth_image.reshape(1, width * height), (3, 1)), backprojected
-        ).T
-        if finite_depth:
-            pc = pc[np.isfinite(pc[:, 0]), :]
-        capture_camera = camera_T_world.inverse * SE3(
-            np.array([0, 0, 0]), np.array([0, 1, 0, 0])
-        )
-        pc = pc[~np.all(pc == 0, axis=1)]
-        transform_pointcloud(pc, capture_camera.matrix, in_place=True)
-        return pc
 
-    def load_robot(self, robot_type, hd=False, collision_free=False, **kwargs):
-        """
-        Generic function to load a robot.
-        """
-        if robot_type == FrankaRobot:
-            robot = BulletFranka(self.clid, hd, **kwargs)
-        elif robot_type == FrankaGripper:
-            if collision_free:
-                robot = VisualGripper(self.clid, **kwargs)
-            else:
-                robot = BulletFrankaGripper(self.clid, **kwargs)
-        self.robots[robot.id] = robot
-        return robot
+        pcs = []
+        for i in range(5):
+            if i == 0: # all
+                _depth_image = copy.deepcopy(depth_image)
+                _depth_image[segmentation == -1] = 0.0
+                _depth_image[segmentation == 0] = 0.0
+            elif i == 1: # robot
+                _depth_image = copy.deepcopy(depth_image)
+                _depth_image[segmentation != 1] = 0.0
+            elif i == 2: # mount table
+                _depth_image = copy.deepcopy(depth_image)
+                _depth_image[segmentation != 2] = 0.0
+            elif i == 3: # front object
+                _depth_image = copy.deepcopy(depth_image)
+                _depth_image[segmentation != 3] = 0.0
+            elif i == 4: # object
+                _depth_image = copy.deepcopy(depth_image)
+                _depth_image[segmentation < 4] = 0.0
+                                
+            x, y = np.meshgrid(np.arange(width), np.arange(height))
+            ones = np.ones((height, width))
+            image_points = np.stack((x, y, ones), axis=2).reshape(width * height, 3).T
+            backprojected = np.linalg.inv(K) @ image_points
+            pc = np.multiply(np.tile(_depth_image.reshape(1, width * height), (3, 1)),
+                            backprojected).T
+            if finite_depth:
+                pc = pc[np.isfinite(pc[:, 0]), :]
+            pc = transform_pointcloud(pc, np.linalg.inv(extrinsic), in_place=False)
+            
+            pcs.append(pc)
+        pcs = np.array(pcs)
+        return pcs
 
-    def in_collision(self, robot, radius=0.0, check_self=False, **kwargs):
-        return robot.in_collision(self.obstacle_ids, radius, check_self, **kwargs)
-
+    '''
+import open3d as o3d
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(pc)
+o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)])
+    '''
+    
+    
     def load_mesh(self, visual_mesh_path, collision_mesh_path=None, color=None):
         if collision_mesh_path is None:
             collision_mesh_path = visual_mesh_path
@@ -722,112 +796,61 @@ class Bullet:
         self.obstacle_ids.append(obstacle_id)
         return obstacle_id
 
-    def load_cuboid(self, cuboid, color=None, visual_only=False):
-        assert isinstance(cuboid, Cuboid)
+
+    def load_cuboid_cylinder(self, primitive, color, mass, lateral_friction, rolling_friction, visual_only=False):
+        assert isinstance(primitive, Cuboid) or isinstance(primitive, Cylinder)
         if color is None:
             color = [0.85882353, 0.14117647, 0.60392157, 1]
-        assert not cuboid.is_zero_volume(), "Cannot load zero volume cuboid"
+        assert not primitive.is_zero_volume(), 'Cannot load zero volume primitive'
         kwargs = {}
         if self.use_gui or self.headless:
-            obstacle_visual_id = p.createVisualShape(
-                shapeType=p.GEOM_BOX,
-                halfExtents=cuboid.half_extents.tolist(),
-                rgbaColor=color,
-                physicsClientId=self.clid,
-            )
-            kwargs["baseVisualShapeIndex"] = obstacle_visual_id
+            if isinstance(primitive, Cuboid):
+                obstacle_visual_id = p.createVisualShape(shapeType=p.GEOM_BOX,
+                                                         halfExtents=primitive.half_extents.tolist(),
+                                                         rgbaColor=color,
+                                                         physicsClientId=self.clid)
+            else:
+                obstacle_visual_id = p.createVisualShape(shapeType=p.GEOM_CYLINDER,
+                                                         radius=primitive.radius,
+                                                         length=primitive.height,
+                                                         rgbaColor=color,
+                                                         physicsClientId=self.clid)
+            kwargs['baseVisualShapeIndex'] = obstacle_visual_id
         if not visual_only:
-            obstacle_collision_id = p.createCollisionShape(
-                shapeType=p.GEOM_BOX,
-                halfExtents=cuboid.half_extents.tolist(),
-                physicsClientId=self.clid,
-            )
-            kwargs["baseCollisionShapeIndex"] = obstacle_collision_id
-        obstacle_id = p.createMultiBody(
-            basePosition=cuboid.center.tolist(),
-            baseOrientation=cuboid.pose.so3.xyzw,
-            physicsClientId=self.clid,
-            **kwargs,
-        )
-        self.obstacle_ids.append(obstacle_id)
-        return obstacle_id
-
-    def load_cylinder(self, cylinder, color=None, visual_only=False):
-        assert isinstance(cylinder, Cylinder)
-        if color is None:
-            color = [0.85882353, 0.14117647, 0.60392157, 1]
-        assert not cylinder.is_zero_volume(), "Cannot load zero volume cylinder"
-        kwargs = {}
-        if self.use_gui or self.headless:
-            obstacle_visual_id = p.createVisualShape(
-                shapeType=p.GEOM_CYLINDER,
-                radius=cylinder.radius,
-                length=cylinder.height,
-                rgbaColor=color,
-                physicsClientId=self.clid,
-            )
-            kwargs["baseVisualShapeIndex"] = obstacle_visual_id
-        if not visual_only:
-            obstacle_collision_id = p.createCollisionShape(
-                shapeType=p.GEOM_CYLINDER,
-                radius=cylinder.radius,
-                height=cylinder.height,
-                physicsClientId=self.clid,
-            )
-            kwargs["baseCollisionShapeIndex"] = obstacle_collision_id
-        obstacle_id = p.createMultiBody(
-            basePosition=cylinder.center.tolist(),
-            baseOrientation=cylinder.pose.so3.xyzw,
-            physicsClientId=self.clid,
-            **kwargs,
-        )
-        self.obstacle_ids.append(obstacle_id)
-        return obstacle_id
-
-    def load_sphere(self, sphere, color=None, visual_only=False):
-        assert isinstance(sphere, Sphere)
-        if color is None:
-            color = [0.0, 0.0, 0.0, 1.0]
-        kwargs = {}
-        if self.use_gui or self.headless:
-            obstacle_visual_id = p.createVisualShape(
-                shapeType=p.GEOM_SPHERE,
-                radius=sphere.radius,
-                rgbaColor=color,
-                physicsClientId=self.clid,
-            )
-            kwargs["baseVisualShapeIndex"] = obstacle_visual_id
-        if not visual_only:
-            obstacle_collision_id = p.createCollisionShape(
-                shapeType=p.GEOM_SPHERE,
-                radius=sphere.radius,
-                physicsClientId=self.clid,
-            )
-            kwargs["baseCollisionShapeIndex"] = obstacle_collision_id
-        obstacle_id = p.createMultiBody(
-            basePosition=sphere.center,
-            physicsClientId=self.clid,
-            **kwargs,
-        )
+            if isinstance(primitive, Cuboid):
+                obstacle_collision_id = p.createCollisionShape(shapeType=p.GEOM_BOX,
+                                                               halfExtents=primitive.half_extents.tolist(),
+                                                               physicsClientId=self.clid)
+            else:
+                obstacle_collision_id = p.createCollisionShape(shapeType=p.GEOM_CYLINDER,
+                                                               radius=primitive.radius,
+                                                               height=primitive.height,
+                                                               physicsClientId=self.clid)
+            kwargs['baseCollisionShapeIndex'] = obstacle_collision_id
+        
+        obstacle_id = p.createMultiBody(baseMass=mass,
+                                        basePosition=primitive.center.tolist(),
+                                        baseOrientation=primitive.pose.so3.xyzw,
+                                        physicsClientId=self.clid,
+                                        **kwargs)
+        p.changeDynamics(obstacle_id,
+                         -1,
+                         lateralFriction=lateral_friction,
+                         rollingFriction=rolling_friction,
+                         physicsClientId=self.clid)
+        
         self.obstacle_ids.append(obstacle_id)
         return obstacle_id
 
     def load_primitives(self, primitives, color=None, visual_only=False):
         ids = []
         for prim in primitives:
-            if prim.is_zero_volume():
+            if prim.primitive.is_zero_volume():
                 continue
-            elif isinstance(prim, Cuboid):
-                ids.append(self.load_cuboid(prim, color, visual_only))
-            elif isinstance(prim, Cylinder):
-                ids.append(self.load_cylinder(prim, color, visual_only))
-            elif isinstance(prim, Sphere):
-                ids.append(self.load_sphere(prim, color, visual_only))
-            else:
-                raise Exception(
-                    "Only cuboids, cylinders, and spheres supported as primitives"
-                )
+            if isinstance(prim.primitive, Cuboid) or isinstance(prim.primitive, Cylinder):
+                ids.append(self.load_cuboid_cylinder(prim.primitive, prim.color, prim.mass, prim.lateral_friction, prim.rolling_friction, visual_only))
         return ids
+
 
     def load_urdf_obstacle(self, path, pose=None):
         if pose is not None:
@@ -874,18 +897,28 @@ class Bullet:
 
 
 class BulletController(Bullet):
-    def __init__(self, gui=False, hz=12, substeps=20):
-        """
-        :param gui: Whether to use a gui to visualize the environment.
-            Only one gui instance allowed
-        """
-        super().__init__(gui)
+    def __init__(self, gui=False, hz=12):
+        super().__init__(gui, ~gui)
+        self.gui = gui
+        self.dt = 1 / hz
+        self.solver_iterations = 150
         p.setPhysicsEngineParameter(
             fixedTimeStep=1 / hz,
-            numSubSteps=substeps,
-            deterministicOverlappingPairs=1,
+            numSolverIterations=self.solver_iterations,
+            # numSubSteps=substeps,
+            # deterministicOverlappingPairs=1,
             physicsClientId=self.clid,
         )
+        p.setGravity(0.0, 0.0, -9.81)
+        self.sim_time = 0.0
+
+        uid = p.createCollisionShape(p.GEOM_PLANE, physicsClientId=self.clid)
+        p.createMultiBody(baseMass=0.0,
+                          baseCollisionShapeIndex=uid,
+                          baseVisualShapeIndex=uid,
+                          basePosition=[0.0, 0.0, -0.02],
+                          physicsClientId=self.clid)
 
     def step(self):
         p.stepSimulation(physicsClientId=self.clid)
+        self.sim_time += self.dt
