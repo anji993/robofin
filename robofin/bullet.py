@@ -898,7 +898,7 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
 
 class BulletController(Bullet):
     def __init__(self, gui=False, hz=12):
-        super().__init__(gui, ~gui)
+        super().__init__(gui, not gui)
         self.gui = gui
         self.dt = 1 / hz
         self.solver_iterations = 150
