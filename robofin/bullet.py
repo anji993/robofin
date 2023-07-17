@@ -850,8 +850,10 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
             if isinstance(prim.primitive, Cuboid) or isinstance(prim.primitive, Cylinder):
                 ids.append(self.load_cuboid_cylinder(prim.primitive, prim.color, prim.mass, prim.lateral_friction, prim.rolling_friction, visual_only))
         return ids
-
-
+    
+    def get_object_pose(self, id):
+        return p.getBasePositionAndOrientation(id, physicsClientId=self.clid)
+        
     def load_urdf_obstacle(self, path, pose=None):
         if pose is not None:
             obstacle_id = p.loadURDF(
@@ -898,7 +900,7 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
 
 class BulletController(Bullet):
     def __init__(self, gui=False, hz=12):
-        super().__init__(gui, ~gui)
+        super().__init__(gui, not gui)
         self.gui = gui
         self.dt = 1 / hz
         self.solver_iterations = 150
