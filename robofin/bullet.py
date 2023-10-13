@@ -797,6 +797,13 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
         return obstacle_id
 
 
+    def reset_object_pose(self, obstacle_id, pos, ori):
+        p.resetBasePositionAndOrientation(bodyUniqueId=obstacle_id,
+                                          posObj=pos,
+                                          ornObj=ori,
+                                          physicsClientId=self.clid)
+
+
     def load_cuboid_cylinder(self, primitive, color, mass, lateral_friction, rolling_friction, visual_only=False):
         assert isinstance(primitive, Cuboid) or isinstance(primitive, Cylinder)
         if color is None:
