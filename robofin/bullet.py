@@ -11,6 +11,15 @@ import math
 import trimesh
 from ikfast_franka_panda import get_fk, get_ik
 
+class Contact(object):
+    def __init__(self, bodyA, bodyB, point, normal, depth, force):
+        self.bodyA = bodyA
+        self.bodyB = bodyB
+        self.point = point
+        self.normal = normal
+        self.depth = depth
+        self.force = force
+
 class BulletRobot:
     def __init__(self, clid, hd=False, **kwargs):
         self.clid = clid
@@ -543,7 +552,6 @@ class Bullet:
     def restore_state(self):
         p.restoreState(self.snapshot_id)
 
-
     def visualize_pose(self, pose):
         root_path = Path("/tmp")
 
@@ -669,7 +677,6 @@ class Bullet:
                 'distance': params[10],
                 'target': params[11]}
 
-
     def get_camera_images(
         self,
         extrinsic,
@@ -767,8 +774,7 @@ import open3d as o3d
 pcd = o3d.geometry.PointCloud()
 pcd.points = o3d.utility.Vector3dVector(pc)
 o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)])
-    '''
-    
+    '''    
     
     def load_mesh(self, visual_mesh_path, collision_mesh_path=None, color=None):
         if collision_mesh_path is None:
@@ -796,13 +802,11 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
         self.obstacle_ids.append(obstacle_id)
         return obstacle_id
 
-
     def reset_object_pose(self, obstacle_id, pos, ori):
         p.resetBasePositionAndOrientation(bodyUniqueId=obstacle_id,
                                           posObj=pos,
                                           ornObj=ori,
                                           physicsClientId=self.clid)
-
 
     def load_cuboid_cylinder(self, primitive, color, mass, lateral_friction, rolling_friction, visual_only=False):
         assert isinstance(primitive, Cuboid) or isinstance(primitive, Cylinder)
@@ -904,6 +908,26 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
                 p.removeBody(id, physicsClientId=self.clid)
         self.poses = []
 
+    def check_success(self):
+        assert len(self.robots) == 1
+        for k, v in self.robots.items():
+            contacts = []
+            points = p.getContactPoints(k, physicsClientId=self.clid)
+            for point in points:
+                if not point[1] == point[2] == 1:
+                    contact = Contact(
+                        bodyA=point[1],
+                        bodyB=point[2],
+                        point=point[5],
+                        normal=point[7],
+                        depth=point[8],
+                        force=point[9],
+                    )
+                    contacts.append(contact)
+            if len(contacts) > 0 and np.sum([g[0] for g in p.getJointStates(k, [9, 10], physicsClientId=self.clid)]) > 0.1 * 0.08:
+                return True
+            else:
+                return False
 
 class BulletController(Bullet):
     def __init__(self, gui=False, hz=12):
