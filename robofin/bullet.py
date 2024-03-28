@@ -856,28 +856,44 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
     def load_primitives(self, primitives, color=None, visual_only=False):
         ids = []
         for prim in primitives:
-            if prim.primitive.is_zero_volume():
-                continue
-            if isinstance(prim.primitive, Cuboid) or isinstance(prim.primitive, Cylinder):
-                ids.append(self.load_cuboid_cylinder(prim.primitive, prim.color, prim.mass, prim.lateral_friction, prim.rolling_friction, visual_only))
+            if isinstance(prim, tuple):
+                if prim[0] < 2:
+                    if prim[1].primitive.is_zero_volume():
+                        continue
+                    if isinstance(prim[1].primitive, Cuboid) or isinstance(prim[1].primitive, Cylinder):
+                        ids.append(self.load_cuboid_cylinder(prim[1].primitive, prim[1].color, prim[1].mass, prim[1].lateral_friction, prim[1].rolling_friction, visual_only))
+                    else:
+                        raise NotImplementedError
+                else:
+                    ids.append(self.load_urdf_obstacle(prim[2], pose=prim[1].pose, scaling=prim[3]))
+            else:
+                if prim.primitive.is_zero_volume():
+                    continue
+                if isinstance(prim.primitive, Cuboid) or isinstance(prim.primitive, Cylinder):
+                    ids.append(self.load_cuboid_cylinder(prim.primitive, prim.color, prim.mass, prim.lateral_friction, prim.rolling_friction, visual_only))
+                else:
+                    raise NotImplementedError
+                
         return ids
     
     def get_object_pose(self, id):
         return p.getBasePositionAndOrientation(id, physicsClientId=self.clid)
         
-    def load_urdf_obstacle(self, path, pose=None):
+    def load_urdf_obstacle(self, path, pose=None, scaling=1.0):
         if pose is not None:
             obstacle_id = p.loadURDF(
                 str(path),
                 basePosition=pose.xyz,
                 baseOrientation=pose.so3.xyzw,
-                useFixedBase=True,
+                useFixedBase=False,
+                globalScaling=scaling,
                 physicsClientId=self.clid,
             )
         else:
             obstacle_id = p.loadURDF(
                 str(path),
                 useFixedBase=True,
+                globalScaling=scaling,
                 physicsClientId=self.clid,
             )
         self.obstacle_ids.append(obstacle_id)
@@ -928,6 +944,9 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
                 return True
             else:
                 return False
+            
+    def get_velocity(self, uid):
+        return p.getBaseVelocity(uid, physicsClientId=self.clid)
 
 class BulletController(Bullet):
     def __init__(self, gui=False, hz=12):
