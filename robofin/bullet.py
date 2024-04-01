@@ -853,7 +853,7 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
         self.obstacle_ids.append(obstacle_id)
         return obstacle_id
 
-    def load_primitives(self, primitives, color=None, visual_only=False):
+    def load_primitives(self, primitives, color=None, visual_only=False, urdf_friction=False):
         ids = []
         for prim in primitives:
             if isinstance(prim, tuple):
@@ -865,7 +865,9 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
                     else:
                         raise NotImplementedError
                 else:
-                    ids.append(self.load_urdf_obstacle(prim[2], pose=prim[1].pose, scaling=prim[3]))
+                    ids.append(self.load_urdf_obstacle(prim[2], pose=prim[1].primitive.pose, scaling=prim[3]))
+                    if urdf_friction:
+                        self.change_urdf_friction(ids[-1], prim[1].lateral_friction, prim[1].rolling_friction)
             else:
                 if prim.primitive.is_zero_volume():
                     continue
@@ -898,6 +900,15 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
             )
         self.obstacle_ids.append(obstacle_id)
         return obstacle_id
+    
+    def change_urdf_friction(self, id, lateral_friction=1.0, rolling_friction=0.0):
+        _, old_lateral_friction, _, _, _, _, old_rolling_friction, _, _, _, _, _ = p.getDynamicsInfo(id, -1, physicsClientId=self.clid)
+        p.changeDynamics(id,
+                         -1,
+                         lateralFriction=lateral_friction,
+                         rollingFriction=rolling_friction,
+                         physicsClientId=self.clid)
+        
 
     def clear_obstacle(self, id):
         """
