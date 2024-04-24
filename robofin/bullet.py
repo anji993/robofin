@@ -865,7 +865,7 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
                     else:
                         raise NotImplementedError
                 else:
-                    ids.append(self.load_urdf_obstacle(prim[2], pose=prim[1].primitive.pose, scaling=prim[3]))
+                    ids.append(self.load_urdf_obstacle(prim[2], pose=prim[1].primitive.pose, scaling=prim[3], color=prim[1].color))
                     if urdf_friction:
                         self.change_urdf_friction(ids[-1], prim[1].lateral_friction, prim[1].rolling_friction)
             else:
@@ -881,7 +881,7 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
     def get_object_pose(self, id):
         return p.getBasePositionAndOrientation(id, physicsClientId=self.clid)
         
-    def load_urdf_obstacle(self, path, pose=None, scaling=1.0):
+    def load_urdf_obstacle(self, path, pose=None, scaling=1.0, color=None):
         if pose is not None:
             obstacle_id = p.loadURDF(
                 str(path),
@@ -890,7 +890,7 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
                 useFixedBase=False,
                 globalScaling=scaling,
                 physicsClientId=self.clid,
-            )
+                )
         else:
             obstacle_id = p.loadURDF(
                 str(path),
@@ -898,6 +898,13 @@ o3d.visualization.draw_geometries([pcd, o3d.geometry.TriangleMesh.create_coordin
                 globalScaling=scaling,
                 physicsClientId=self.clid,
             )
+
+        if color is not None:
+            p.changeVisualShape(obstacle_id,
+                                -1,
+                                rgbaColor=color,
+                                physicsClientId=self.clid)
+
         self.obstacle_ids.append(obstacle_id)
         return obstacle_id
     
